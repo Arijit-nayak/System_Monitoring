@@ -4,16 +4,24 @@
 #include <dirent.h>
 #include <unistd.h>
 #include <cctype>
-#include <signal.h>  // for kill() and SIGKILL
+#include <csignal>
+#include <vector>
+#include <algorithm>
 using namespace std;
 
-// Function to get total and used memory
+// Structure to store process info
+struct Process {
+    int pid;
+    string name;
+    long memory;     // in KB
+    float cpuUsage;  // CPU %
+};
+
+// ================= MEMORY INFO =================
 void getMemoryInfo() {
     ifstream meminfo("/proc/meminfo");
-    string key;
-    long value;
-    string unit;
-    long totalMem = 0, freeMem = 0;
+    string key, unit;
+    long value, totalMem = 0, freeMem = 0;
 
     while (meminfo >> key >> value >> unit) {
         if (key == "MemTotal:") totalMem = value;
@@ -24,69 +32,7 @@ void getMemoryInfo() {
     cout << "Used Memory : " << (totalMem - freeMem) / 1024 << " MB\n";
 }
 
-
-
-
-void killProcess() {
-    int pid;
-    cout << "\nEnter PID to kill (0 to skip): ";
-    cin >> pid;
-
-    if (pid == 0) return;  // skip if user doesn’t want to kill anything
-
-    int result = kill(pid, SIGKILL);
-    if (result == 0)
-        cout << "✅ Process " << pid << " terminated successfully.\n";
-    else
-        perror("❌ Failed to kill process");
-    
-    sleep(2); // small delay before refreshing
-}
-
-// Function to list processes
-void listProcesses() {
-    DIR* dir = opendir("/proc");
-    struct dirent* entry;
-
-    cout << "\nPID\tProcess Name\tMemory (KB)\n";
-    cout << "----------------------------------\n";
-
-    while ((entry = readdir(dir)) != nullptr) {
-        // Check if folder name is a number (PID)
-        if (isdigit(entry->d_name[0])) {
-            string pid = entry->d_name;
-            string commPath = "/proc/" + pid + "/comm";
-            string statusPath = "/proc/" + pid + "/status";
-
-            ifstream commFile(commPath);
-            ifstream statusFile(statusPath);
-
-            string processName;
-            getline(commFile, processName);
-
-            string key;
-            long mem = 0;
-            string unit;
-            while (statusFile >> key >> mem >> unit) {
-                if (key == "VmRSS:") break;
-            }
-
-            cout << pid << "\t" << processName << "\t" << mem << endl;
-        }
-    }
-    closedir(dir);
-}
-
-// CPU info (for later enhancement)
-void getCPUUsage() {
-    ifstream statFile("/proc/stat");
-    string cpu;
-    long user, nice, system, idle;
-    statFile >> cpu >> user >> nice >> system >> idle;
-
-    cout << "\nCPU Stats (user+system): " << (user + system)
-         << " | Idle Time: " << idle << endl;
-}
+// ================= CPU USAGE =================
 float calculateCPUUsage() {
     ifstream statFile("/proc/stat");
     string cpu;
@@ -108,8 +54,11 @@ float calculateCPUUsage() {
 
     prevTotal = total;
     prevIdle = idleTime;
+
     return usage;
 }
+
+// ================= UPTIME =================
 void showUptime() {
     ifstream uptimeFile("/proc/uptime");
     double uptimeSeconds;
@@ -117,27 +66,112 @@ void showUptime() {
 
     int hours = uptimeSeconds / 3600;
     int minutes = ((int)uptimeSeconds % 3600) / 60;
+
     cout << "Uptime: " << hours << " hrs " << minutes << " mins\n";
 }
 
+// ================= KILL PROCESS =================
+void killProcess() {
+    int pid;
+    cout << "\nEnter PID to kill (0 to skip): ";
+    cin >> pid;
 
+    if (pid == 0) return;
 
-int main() {
-    while (true) {
-        system("clear");  // Clear the screen
+    int result = kill(pid, SIGKILL);
+    if (result == 0)
+        cout << "✅ Process " << pid << " terminated successfully.\n";
+    else
+        perror("❌ Failed to kill process");
 
-        cout << "===== System Monitor =====\n";
-        getMemoryInfo();
-        getCPUUsage();
-        showUptime();
-        cout << "CPU Usage: " << calculateCPUUsage() << "%\n";
-        listProcesses();
-        killProcess();
-
-        cout << "\nRefreshing in 3 seconds... (Press Ctrl+C to exit)\n";
-        sleep(3);  // Wait 3 seconds before refreshing
-    }
-    return 0;
+    sleep(2);
 }
 
+// ================= GET PROCESS LIST =================
+vector<Process> getProcesses() {
+    DIR* dir = opendir("/proc");
+    struct dirent* entry;
+    vector<Process> processes;
 
+    while ((entry = readdir(dir)) != nullptr) {
+        if (isdigit(entry->d_name[0])) {
+            string pidStr = entry->d_name;
+            int pid = stoi(pidStr);
+
+            string commPath = "/proc/" + pidStr + "/comm";
+            string statusPath = "/proc/" + pidStr + "/status";
+
+            ifstream commFile(commPath);
+            ifstream statusFile(statusPath);
+
+            if (!commFile || !statusFile) continue;
+
+            string processName;
+            getline(commFile, processName);
+
+            string key, unit;
+            long mem = 0;
+            while (statusFile >> key >> mem >> unit) {
+                if (key == "VmRSS:") break;
+            }
+
+            // CPU usage per process (approximation)
+            string statPath = "/proc/" + pidStr + "/stat";
+            ifstream statFile(statPath);
+            if (!statFile) continue;
+            string tmp;
+            long utime, stime;
+            for (int i = 0; i < 13; i++) statFile >> tmp; // skip first 13 columns
+            statFile >> utime >> stime;
+
+            float cpuUsage = (utime + stime) / 100.0; // rough estimate
+
+            processes.push_back({pid, processName, mem, cpuUsage});
+        }
+    }
+
+    closedir(dir);
+    return processes;
+}
+
+// ================= DISPLAY PROCESSES =================
+void listProcesses(const vector<Process>& processes) {
+    cout << "\nPID\tProcess Name\tMemory (KB)\tCPU Usage (%)\n";
+    cout << "-------------------------------------------------------\n";
+    for (const auto& p : processes) {
+        cout << p.pid << "\t" << p.name << "\t" << p.memory << "\t\t" << p.cpuUsage << endl;
+    }
+}
+
+// ================= MAIN =================
+int main() {
+    while (true) {
+        system("clear");
+
+        cout << "===== SYSTEM MONITOR =====\n";
+        getMemoryInfo();
+        showUptime();
+        cout << "CPU Usage: " << calculateCPUUsage() << "%\n";
+
+        vector<Process> processes = getProcesses();
+
+        int choice;
+        cout << "\nSort by: 1) Memory  2) CPU usage → ";
+        cin >> choice;
+
+        if (choice == 1)
+            sort(processes.begin(), processes.end(),
+                 [](const Process& a, const Process& b) { return a.memory > b.memory; });
+        else if (choice == 2)
+            sort(processes.begin(), processes.end(),
+                 [](const Process& a, const Process& b) { return a.cpuUsage > b.cpuUsage; });
+
+        listProcesses(processes);
+        killProcess();
+
+        cout << "\nRefreshing in 3 seconds... (Ctrl+C to exit)\n";
+        sleep(3);
+    }
+
+    return 0;
+}
